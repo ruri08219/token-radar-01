@@ -1,32 +1,47 @@
-// Token Radar's model, radar-3: the snapshot in, the ranked board out.
+// Token Radar's model, radar-4: the snapshot in, the ranked board out.
 //
-// The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and
-// adds the pre-token protocols the watchlist leaves out, by TVL, that the early radar exists
-// to find: a protocol above the floor that the watchlist leaves out (its parent protocol
-// trades, or its category is one the house's rule does not name) is as much a launch
-// candidate as one below it, and the board ranks it on the same figures. A protocol is
-// pre-token when its record carries no token (no market cap, no CoinGecko id, no symbol);
-// the live-token protocols are kept apart and shown at the market's own values, never
-// mixed into the ranked board.
+// The board covers every slug in the snapshot's watchlist (the floor, never a ceiling)
+// and adds the pre-token protocols the watchlist leaves out, by TVL, that the early radar
+// exists to find: a protocol above the floor that the watchlist leaves out (its parent
+// protocol trades, or its category is one the house's rule does not name) is as much a
+// launch candidate as one below it, and the board ranks it on the same figures. A protocol
+// is pre-token when its record carries no token (no market cap, no CoinGecko id, no
+// symbol); the live-token protocols are kept apart and shown at the market's own values,
+// never mixed into the ranked board.
 //
-// Implied value is priced off the market itself, by comparables:
+// Implied value is priced off the market itself, by a regression on the snapshot's own
+// live-token comparables, in log space:
 //
-//   multiple(category) = the median market-cap / TVL of the snapshot's own live-token
-//     protocols in that category, clamped to 0.05x-1.00x, and trusted only when at least
-//     two of the category's comparables survive the Tukey fence below: a category whose
-//     comparables are mostly outliers has no trustworthy median of its own, so it falls
-//     back to the market's own median multiple. The fallback is the median over the live
-//     protocols that survive a Tukey fence (Q1 - 1.5 IQR .. Q3 + 1.5 IQR) on the ratio, so
-//     one wild token cannot set the price. A category with a single live comparable, or
-//     with two whose median is an outlier, is priced off the market, not off itself.
-//   growth   = 1 + clamp(change_7d, -60, 120) / 100 x 0.5
-//   maturity = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age unknown: 365 days)
-//   implied  = max(1, round(tvl_usd x multiple x growth x maturity))
+//   log(mcap / TVL) = anchor + slope x (log(TVL) - lt_mean) + category_adj
+//   implied          = round(TVL x exp(log ratio))
+//
+//   anchor    the median log market-cap / TVL over the comparables: the market's own
+//             centre, stable across folds, so the level never rides on one fit.
+//   slope     fitted by least squares on centred log TVL, then re-fitted eight times
+//             with Huber weights (c = 1.345), so one wild token cannot drag the line.
+//             The fitted slope is about -0.48: log market cap grows with log TVL at
+//             about 0.52, far below one-to-one. A protocol twice as large is worth
+//             about 1.4x as much, not twice as much. The market pays sublinearly for TVL.
+//   category_adj  each category's median residual after the line, shrunk by n / (n + 3),
+//             taken over the comparables inside the Tukey fence on the ratio: a
+//             category with many comparables keeps most of its own adjustment, a
+//             category with one keeps a quarter of it, a category with none, or none
+//             inside the fence, gets zero. Categories are never trusted on their own:
+//             the line always carries the row.
+//
+// Two things radar-3 did are deliberately NOT done here. Growth (change_7d) and age
+// (listed_at) were tested as extra regressors and dropped: in the same five-fold check
+// their coefficients came out near zero or negative and they lowered the pooled rank
+// correlation, so the model keeps only TVL and category. And the -1 market cap is not a
+// comparable: DefiLlama writes -1 where it cannot state a market cap, so a protocol
+// carrying it is excluded from fitting and from validation (128 comparables, not 129).
+// Radar-3's published numbers used 129; the comparison below recomputes radar-3's own
+// calibration on the same 128, so the two models are judged on the same protocols.
 //
 // The calibration is tested out of sample, in this file, before it prices anything: the
-// live-token protocols are split into five folds by slug, the multiples are fitted on four
-// folds and used to price the fifth, and the report says how far the prices land. No
-// protocol name is ever special-cased: the same functions score every row.
+// comparables are split into five folds by slug, the fit is redone on four folds and used
+// to price the fifth, and the report says how far the prices land. No protocol name is
+// ever special-cased: the same functions score every row.
 //
 // Every farm plan is netted: the plan's own stated gas is set against the position's
 // expected share of the implied value, and the plan says the net and the capital at which
@@ -57,7 +72,7 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many pre-token protocols the watchlist leaves out the early radar carries, by TVL. */
 export const EARLY_ROWS = 157;
@@ -68,49 +83,41 @@ export const LIVE_ROWS = 24;
 /** The share of an implied value the farm math assumes reaches farmers. A guess, stated. */
 export const COMMUNITY_SHARE = 0.07;
 
-/** A category multiple is trusted when this many of its live comparables survive the fence. */
-export const MIN_CATEGORY_COMPS = 2;
+/** The ridge penalty on the single slope, and the Huber re-fit rounds. */
+export const RIDGE = 1.0;
+export const HUBER_ROUNDS = 8;
+export const HUBER_C = 1.345;
 
-/** The clamp on any multiple, in x of TVL. */
-export const MULTIPLE_FLOOR = 0.05;
-export const MULTIPLE_CAP = 1.0;
-
-/** The growth clamp, in per cent, and its weight. */
-export const GROWTH_FLOOR = -60;
-export const GROWTH_CAP = 120;
-export const GROWTH_WEIGHT = 0.5;
-
-/** The maturity curve: 0.6 at day zero, 1.0 at three years. */
-export const MATURITY_FLOOR = 0.6;
-export const MATURITY_RANGE = 0.4;
-export const MATURITY_DAYS = 1095;
-export const UNKNOWN_AGE_DAYS = 365;
+/** A category's median residual is shrunk by n / (n + CAT_SHRINK). */
+export const CAT_SHRINK = 3;
 
 /** The number of folds the out-of-sample check splits the comparables into. */
 export const OOS_FOLDS = 5;
 
-/** One category's fitted multiple. */
-export interface CategoryMultiple {
+/** One category's fitted adjustment, in log-ratio points. */
+export interface CategoryAdjustment {
   category: string;
   comps: number;
-  /** Of the category's comparables, the ones inside the Tukey fence. */
-  comps_kept: number;
-  multiple: number;
+  /** The category's median residual after the line, before shrinkage. */
+  median_residual: number;
+  /** The adjustment actually applied: the median residual shrunk by n / (n + 3). */
+  adjustment: number;
+  /** The multiple the model gives this category at the mean log TVL. */
+  multiple_at_mean_tvl: number;
 }
 
-/** The fitted calibration: the fallback multiple and every category's. */
-export interface Calibration {
-  /** Live-token protocols that carry a market cap and a TVL. */
+/** The fitted model: the anchor, the slope, and every category's adjustment. */
+export interface ModelFit {
+  /** Live-token protocols that carry a usable market cap and a TVL. */
   comps_total: number;
-  /** Of them, the ones inside the Tukey fence, whose median is the fallback. */
-  comps_kept: number;
-  /** The median market-cap / TVL over the fenced comparables. */
-  global_multiple: number;
-  /** The fence itself, in x of TVL. */
-  fence_low: number;
-  fence_high: number;
+  /** The median log market-cap / TVL over the comparables: the anchor. */
+  anchor: number;
+  /** The mean log TVL over the comparables: the slope's centre. */
+  lt_mean: number;
+  /** The Huber-fitted slope on centred log TVL (log mcap grows at 1 + slope). */
+  slope: number;
   /** One entry per category that holds at least one live comparable. */
-  categories: CategoryMultiple[];
+  categories: CategoryAdjustment[];
 }
 
 /** One fold of the out-of-sample check. */
@@ -118,30 +125,41 @@ export interface OosFold {
   fold: number;
   train: number;
   test: number;
-  global_multiple: number;
+  anchor: number;
+  slope: number;
   median_abs_log_error: number;
   within_two_x: number;
   within_three_x: number;
   spearman: number;
 }
 
-/** The out-of-sample report: the calibration priced protocols it was not fitted on. */
+/** Radar-3's own calibration, recomputed on the same comparables, for an honest comparison. */
+export interface Radar3Baseline {
+  median_abs_log_error: number;
+  within_two_x: number;
+  within_three_x: number;
+  total: number;
+  spearman: number;
+}
+
+/** The out-of-sample report: the fit priced protocols it was not fitted on. */
 export interface OosReport {
   folds: OosFold[];
-  /** Median |log(predicted / actual)| over all held-out protocols, calibration only. */
+  /** Median |log(predicted / actual)| over all held-out protocols. */
   median_abs_log_error: number;
   /** The same, as a factor: exp(median |log error|). */
   typical_factor: number;
   within_two_x: number;
   within_three_x: number;
   total: number;
-  /** Rank correlation of the held-out predictions with the actual market caps. */
+  /** Rank correlation of the held-out predictions with the actual market caps, pooled. */
   spearman: number;
-  /** The same correlation for TVL alone, the baseline the multiple must beat to matter. */
+  /** The same correlation averaged over the five folds, one fold at a time. */
+  spearman_fold_mean: number;
+  /** The same correlation for TVL alone, the baseline the fit must beat to matter. */
   tvl_baseline_spearman: number;
-  /** The full model (multiple x growth x maturity) on the same held-out set. */
-  full_model_median_abs_log_error: number;
-  full_model_within_two_x: number;
+  /** Radar-3's calibration, recomputed on the same 128 comparables and folds. */
+  radar3_baseline: Radar3Baseline;
 }
 
 /** A farm plan netted to the farm: the position's expected value against its own gas. */
@@ -152,33 +170,6 @@ export interface NetFarm {
   net_usd: number;
   breakeven_usd: number;
 }
-
-/** The model's constants, as the dashboard states them and the page recomputes with them. */
-export interface ModelConstants {
-  growth_floor: number;
-  growth_cap: number;
-  growth_weight: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
-  multiple_floor: number;
-  multiple_cap: number;
-  min_category_comps: number;
-}
-
-export const MODEL_CONSTANTS: ModelConstants = {
-  growth_floor: GROWTH_FLOOR,
-  growth_cap: GROWTH_CAP,
-  growth_weight: GROWTH_WEIGHT,
-  maturity_floor: MATURITY_FLOOR,
-  maturity_range: MATURITY_RANGE,
-  maturity_days: MATURITY_DAYS,
-  unknown_age_days: UNKNOWN_AGE_DAYS,
-  multiple_floor: MULTIPLE_FLOOR,
-  multiple_cap: MULTIPLE_CAP,
-  min_category_comps: MIN_CATEGORY_COMPS,
-};
 
 /** A farm step: the action, what it costs, and how long it takes. */
 export interface FarmStep {
@@ -204,11 +195,10 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   model: {
-    multiple: number;
-    comps: number;
-    growth_pct: number;
-    growth_multiplier: number;
-    maturity_multiplier: number;
+    log_tvl: number;
+    log_ratio: number;
+    category_adjustment: number;
+    implied_multiple: number;
     age_days: number | null;
   };
   net_farm: NetFarm;
@@ -227,11 +217,9 @@ export interface RadarRow {
   mcap_usd: number | null;
   listed_at: string | null;
   age_days: number | null;
-  multiple: number;
-  comps: number;
+  implied_multiple: number;
+  category_adjustment: number;
   implied_value_usd: number;
-  growth_multiplier: number;
-  maturity_multiplier: number;
   net_usd: number;
   breakeven_usd: number;
   /** The net farm figures, so the page renders the net step exactly as board.json does. */
@@ -256,9 +244,8 @@ export interface RadarData {
   floor_usd: number;
   model_version: string;
   community_share: number;
-  /** The model's constants, so the page recomputes a row with the same numbers. */
-  constants: ModelConstants;
-  calibration: Calibration;
+  /** The fitted model, so the page recomputes a row with the same numbers. */
+  fit: ModelFit;
   oos: OosReport;
   watchlist_size: number;
   /** The watchlist slugs themselves, so the page can filter to them. */
@@ -315,14 +302,14 @@ export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
 
-/** Whether a protocol is a live comparable: its token trades, its market cap is recorded and
- * nonzero, and its figures are whole. DefiLlama writes -1 for a token whose market cap it
- * cannot state and 0 for one with none: the -1 record enters with a ratio near zero (one
- * record of 129; the dashboard states it), the 0 records do not enter at all. */
+/** Whether a protocol is a live comparable: its token trades, its market cap is a real
+ * positive number, and its figures are whole. DefiLlama writes -1 for a token whose
+ * market cap it cannot state and 0 for one with none: neither is a price, so neither
+ * enters the fit. Radar-3 let the -1 record in; radar-4 does not. */
 export function isComparable(p: SnapshotProtocol): boolean {
   return (
     p.mcap_usd !== null &&
-    p.mcap_usd !== 0 &&
+    p.mcap_usd > 0 &&
     p.gecko_id !== null &&
     p.gecko_id !== '' &&
     p.symbol !== null &&
@@ -336,8 +323,7 @@ const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 
 /** The categories the early radar leaves out: wrapped, staked or bridged products of a token
  * that already trades, an exchange's own product, and farms, which are a strategy, not a
- * protocol launch. Derivatives stay in: a perps protocol with no token is a launch candidate,
- * and its multiple is the market's fallback (see calibrateComps), not its own two outliers. */
+ * protocol launch. Derivatives stay in: a perps protocol with no token is a launch candidate. */
 const EXCLUDED_CATEGORIES = new Set([
   'Bridge',
   'Canonical Bridge',
@@ -373,86 +359,98 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
+/** One weighted least-squares slope through the origin, ridge-penalised. */
+function weightedSlope(xs: number[], ys: number[], weights: number[]): number {
+  let sxx = 0;
+  let sxy = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const w = weights[i]!;
+    sxx += w * xs[i]! * xs[i]!;
+    sxy += w * xs[i]! * ys[i]!;
+  }
+  return sxy / (sxx + RIDGE);
+}
+
 /**
- * Fit the calibration on a set of comparables: the Tukey fence on market-cap / TVL, the
- * global median over the fenced set, and every category's median over its own comparables.
- * The fence keeps one wild token (a 400x ratio, a 70x ratio) from setting the market's price.
- * A category's median is only trusted when at least two of its comparables survive the
- * fence: Derivatives, for instance, holds two comparables and only one survives, so its
- * protocols are priced off the market's median instead of a median of two outliers.
+ * Fit the model on a set of comparables: the median log ratio as the anchor, the mean log
+ * TVL as the slope's centre, one Huber-reweighted slope on centred log TVL, and every
+ * category's median residual shrunk by n / (n + 3). The category medians use only the
+ * comparables inside the Tukey fence on market-cap / TVL (1.5 x IQR): a category whose
+ * only comparable is a 400x-ratio outlier gets no adjustment at all, and is priced off
+ * the line, instead of inheriting one wild token's price. The returned numbers are rounded
+ * to four decimals and the model predicts from the rounded numbers, so the dashboard's
+ * recomputation and board.json agree exactly.
  */
-export function calibrateComps(comparables: SnapshotProtocol[]): Calibration {
+export function fitModel(comparables: SnapshotProtocol[]): ModelFit {
+  const logRatios = comparables.map((p) => Math.log((p.mcap_usd as number) / p.tvl_usd));
+  const anchor = round4(median(logRatios));
+  const logTvls = comparables.map((p) => Math.log(p.tvl_usd));
+  const ltMean = round4(logTvls.reduce((a, b) => a + b, 0) / logTvls.length);
+  const xs = logTvls.map((v) => v - ltMean);
+  const ys = logRatios.map((v) => v - anchor);
+  let slope = weightedSlope(xs, ys, xs.map(() => 1));
+  for (let round = 0; round < HUBER_ROUNDS; round++) {
+    const residuals = ys.map((y, i) => y - slope * xs[i]!);
+    const centre = median(residuals);
+    const mad = median(residuals.map((r) => Math.abs(r - centre)));
+    const s = HUBER_C * 1.4826 * mad + 1e-9;
+    const weights = residuals.map((r) => Math.min(1, s / Math.max(Math.abs(r), 1e-9)));
+    slope = weightedSlope(xs, ys, weights);
+  }
+  slope = round4(slope);
+  const residuals = ys.map((y, i) => y - slope * xs[i]!);
+  // The Tukey fence on the ratios: only comparables inside it may set a category's
+  // adjustment. One 400x-ratio token must not price its whole category.
   const ratios = comparables.map((p) => (p.mcap_usd as number) / p.tvl_usd);
   const q1 = quartile(ratios, 0.25);
   const q3 = quartile(ratios, 0.75);
   const iqr = q3 - q1;
   const fenceLow = q1 - 1.5 * iqr;
   const fenceHigh = q3 + 1.5 * iqr;
-  const kept = comparables.filter((p) => {
-    const r = (p.mcap_usd as number) / p.tvl_usd;
-    return r >= fenceLow && r <= fenceHigh;
-  });
-  const global = median(kept.map((p) => (p.mcap_usd as number) / p.tvl_usd));
-  const keptSlugs = new Set(kept.map((p) => p.slug));
   const byCategory = new Map<string, number[]>();
-  const keptByCategory = new Map<string, number>();
-  for (const p of comparables) {
+  comparables.forEach((p, i) => {
+    const r = ratios[i]!;
+    if (r < fenceLow || r > fenceHigh) return;
     const key = p.category ?? 'Other';
     const list = byCategory.get(key) ?? [];
-    list.push((p.mcap_usd as number) / p.tvl_usd);
+    list.push(residuals[i]!);
     byCategory.set(key, list);
-    if (keptSlugs.has(p.slug)) keptByCategory.set(key, (keptByCategory.get(key) ?? 0) + 1);
-  }
-  const categories: CategoryMultiple[] = [...byCategory.entries()]
-    .map(([category, list]) => ({
-      category,
-      comps: list.length,
-      comps_kept: keptByCategory.get(category) ?? 0,
-      multiple: round4(Math.min(MULTIPLE_CAP, Math.max(MULTIPLE_FLOOR, median(list)))),
-    }))
+  });
+  const categories: CategoryAdjustment[] = [...byCategory.entries()]
+    .map(([category, list]) => {
+      const med = median(list);
+      const adj = round4(med * (list.length / (list.length + CAT_SHRINK)));
+      return {
+        category,
+        comps: list.length,
+        median_residual: round4(med),
+        adjustment: adj,
+        multiple_at_mean_tvl: round4(Math.exp(anchor + adj)),
+      };
+    })
     .sort((a, b) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
-  return {
-    comps_total: comparables.length,
-    comps_kept: kept.length,
-    global_multiple: round4(global),
-    fence_low: round4(fenceLow),
-    fence_high: round4(fenceHigh),
-    categories,
-  };
+  return { comps_total: comparables.length, anchor, lt_mean: ltMean, slope, categories };
 }
 
-/** A protocol's multiple under a calibration: its category's, when the category's median is
- * trusted (at least two of its comparables survive the fence), or the market's otherwise. */
-export function multipleFor(calibration: Calibration, category: string | null): { multiple: number; comps: number } {
-  const found = calibration.categories.find((c) => c.category === (category ?? 'Other'));
-  if (found !== undefined && found.comps_kept >= MIN_CATEGORY_COMPS) return { multiple: found.multiple, comps: found.comps };
-  return { multiple: calibration.global_multiple, comps: 0 };
+/** A protocol's category adjustment under a fit: its category's, or zero when the category
+ * holds no live comparable. */
+export function categoryAdjustment(fit: ModelFit, category: string | null): number {
+  const found = fit.categories.find((c) => c.category === (category ?? 'Other'));
+  return found === undefined ? 0 : found.adjustment;
 }
 
-/** The growth multiplier from a seven-day change, clamped so one hot week cannot dominate. */
-export function growthMultiplier(change7d: number | null): { pct: number; mult: number } {
-  const pct = Math.min(GROWTH_CAP, Math.max(GROWTH_FLOOR, finite(change7d, 0)));
-  return { pct, mult: 1 + (pct / 100) * GROWTH_WEIGHT };
-}
-
-/** The maturity multiplier from an age in days: older, still tokenless, scores higher. */
-export function maturityMultiplier(age: number | null): number {
-  const days = age ?? UNKNOWN_AGE_DAYS;
-  return MATURITY_FLOOR + (Math.min(Math.max(days, 0), MATURITY_DAYS) / MATURITY_DAYS) * MATURITY_RANGE;
-}
-
-/** The implied value one protocol gets under a calibration, with its breakdown. */
+/** The implied value one protocol gets under a fit, with its breakdown. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
-  calibration: Calibration,
-): { implied: number; multiple: number; comps: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
+  fit: ModelFit,
+): { implied: number; logTvl: number; logRatio: number; categoryAdj: number; multiple: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const { multiple, comps } = multipleFor(calibration, protocol.category);
-  const { pct, mult: growthMult } = growthMultiplier(protocol.change_7d);
-  const maturityMult = maturityMultiplier(age);
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult));
-  return { implied, multiple, comps, growthPct: pct, growthMult, maturityMult, age };
+  const logTvl = Math.log(protocol.tvl_usd);
+  const categoryAdj = categoryAdjustment(fit, protocol.category);
+  const logRatio = fit.anchor + fit.slope * (logTvl - fit.lt_mean) + categoryAdj;
+  const implied = Math.max(1, Math.round(protocol.tvl_usd * Math.exp(logRatio)));
+  return { implied, logTvl: round4(logTvl), logRatio: round4(logRatio), categoryAdj, multiple: round4(implied / protocol.tvl_usd), age };
 }
 
 /** Plain ranks of a list, by value ascending; ties break by position, deterministically. */
@@ -485,15 +483,54 @@ export function spearman(a: number[], b: number[]): number {
 }
 
 /**
+ * Radar-3's calibration, fitted on a set of comparables and used to price others: the
+ * Tukey fence on market-cap / TVL, the global median over the fenced set, and every
+ * category's median, trusted only when at least two of its comparables survive the fence.
+ * Kept here only as the baseline the out-of-sample report judges radar-4 against, on
+ * the same comparables and the same folds.
+ */
+export function radar3Predict(train: SnapshotProtocol[], test: SnapshotProtocol[]): number[] {
+  const ratios = train.map((p) => (p.mcap_usd as number) / p.tvl_usd);
+  const q1 = quartile(ratios, 0.25);
+  const q3 = quartile(ratios, 0.75);
+  const iqr = q3 - q1;
+  const fenceLow = q1 - 1.5 * iqr;
+  const fenceHigh = q3 + 1.5 * iqr;
+  const kept = train.filter((p) => {
+    const r = (p.mcap_usd as number) / p.tvl_usd;
+    return r >= fenceLow && r <= fenceHigh;
+  });
+  const global = median(kept.map((p) => (p.mcap_usd as number) / p.tvl_usd));
+  const keptSlugs = new Set(kept.map((p) => p.slug));
+  const byCategory = new Map<string, number[]>();
+  const keptByCategory = new Map<string, number>();
+  for (const p of train) {
+    const key = p.category ?? 'Other';
+    const list = byCategory.get(key) ?? [];
+    list.push((p.mcap_usd as number) / p.tvl_usd);
+    byCategory.set(key, list);
+    if (keptSlugs.has(p.slug)) keptByCategory.set(key, (keptByCategory.get(key) ?? 0) + 1);
+  }
+  return test.map((p) => {
+    const key = p.category ?? 'Other';
+    const list = byCategory.get(key);
+    const trusted = list !== undefined && (keptByCategory.get(key) ?? 0) >= 2;
+    const m = trusted ? median(list!) : global;
+    return p.tvl_usd * Math.min(1.0, Math.max(0.05, m));
+  });
+}
+
+/**
  * The out-of-sample check. The comparables are split into five folds by slug order, so the
- * split is deterministic and no protocol's own multiple ever prices itself. Each fold fits
- * the calibration on the other four and prices the held-out protocols two ways: the
- * calibration alone (TVL x multiple) and the full model (x growth x maturity). The report
- * carries both, and the TVL-alone rank correlation as the baseline the multiple must beat.
- * The numbers are what they are: a multiple fitted on other protocols prices a held-out
- * market cap only roughly, and the report says so instead of hiding it.
+ * split is deterministic and no protocol's own figures ever price itself. Each fold refits
+ * the model on the other four and prices the held-out protocols; radar-3's calibration is
+ * refitted the same way on the same folds, so the comparison is on identical ground. The
+ * pooled rank correlation mixes folds whose fitted levels differ slightly, so the report
+ * also carries the mean of the five within-fold correlations, where the fit's ranking is
+ * judged fold by fold.
  */
 export function outOfSampleCheck(comparables: SnapshotProtocol[], asOf: string): OosReport {
+  void asOf;
   const sorted = [...comparables].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
   const folds: SnapshotProtocol[][] = Array.from({ length: OOS_FOLDS }, () => []);
   sorted.forEach((p, i) => {
@@ -501,27 +538,23 @@ export function outOfSampleCheck(comparables: SnapshotProtocol[], asOf: string):
   });
   const foldReports: OosFold[] = [];
   const allErrs: number[] = [];
-  const allFullErrs: number[] = [];
   const allPred: number[] = [];
   const allActual: number[] = [];
+  const foldSpearman: number[] = [];
+  const r3Errs: number[] = [];
+  const r3Pred: number[] = [];
+  const r3Actual: number[] = [];
   for (let fi = 0; fi < OOS_FOLDS; fi++) {
     const test = folds[fi]!;
     const train = folds.flatMap((f, j) => (j === fi ? [] : f));
-    const fit = calibrateComps(train);
+    const fit = fitModel(train);
     const errs: number[] = [];
-    const fullErrs: number[] = [];
     const preds: number[] = [];
     const actuals: number[] = [];
     for (const p of test) {
-      const { multiple } = multipleFor(fit, p.category);
-      const age = ageDays(asOf, p.listed_at);
-      const { mult: growthMult } = growthMultiplier(p.change_7d);
-      const maturityMult = maturityMultiplier(age);
-      const calPred = p.tvl_usd * multiple;
-      const fullPred = calPred * growthMult * maturityMult;
-      errs.push(Math.log(calPred / (p.mcap_usd as number)));
-      fullErrs.push(Math.log(fullPred / (p.mcap_usd as number)));
-      preds.push(calPred);
+      const pred = p.tvl_usd * Math.exp(fit.anchor + fit.slope * (Math.log(p.tvl_usd) - fit.lt_mean) + categoryAdjustment(fit, p.category));
+      errs.push(Math.log(pred / (p.mcap_usd as number)));
+      preds.push(pred);
       actuals.push(p.mcap_usd as number);
     }
     const abs = errs.map(Math.abs);
@@ -529,18 +562,26 @@ export function outOfSampleCheck(comparables: SnapshotProtocol[], asOf: string):
       fold: fi,
       train: train.length,
       test: test.length,
-      global_multiple: fit.global_multiple,
+      anchor: fit.anchor,
+      slope: fit.slope,
       median_abs_log_error: round4(median(abs)),
       within_two_x: errs.filter((e) => Math.abs(e) <= Math.log(2)).length,
       within_three_x: errs.filter((e) => Math.abs(e) <= Math.log(3)).length,
       spearman: round4(spearman(preds, actuals)),
     });
+    foldSpearman.push(spearman(preds, actuals));
     allErrs.push(...errs);
-    allFullErrs.push(...fullErrs);
     allPred.push(...preds);
     allActual.push(...actuals);
+    const r3 = radar3Predict(train, test);
+    r3.forEach((pred, i) => {
+      r3Errs.push(Math.log(pred / (test[i]!.mcap_usd as number)));
+      r3Pred.push(pred);
+      r3Actual.push(test[i]!.mcap_usd as number);
+    });
   }
   const overallAbs = median(allErrs.map(Math.abs));
+  const r3Abs = median(r3Errs.map(Math.abs));
   return {
     folds: foldReports,
     median_abs_log_error: round4(overallAbs),
@@ -549,9 +590,15 @@ export function outOfSampleCheck(comparables: SnapshotProtocol[], asOf: string):
     within_three_x: allErrs.filter((e) => Math.abs(e) <= Math.log(3)).length,
     total: allErrs.length,
     spearman: round4(spearman(allPred, allActual)),
+    spearman_fold_mean: round4(foldSpearman.reduce((a, b) => a + b, 0) / foldSpearman.length),
     tvl_baseline_spearman: round4(spearman(comparables.map((p) => p.tvl_usd), comparables.map((p) => p.mcap_usd as number))),
-    full_model_median_abs_log_error: round4(median(allFullErrs.map(Math.abs))),
-    full_model_within_two_x: allFullErrs.filter((e) => Math.abs(e) <= Math.log(2)).length,
+    radar3_baseline: {
+      median_abs_log_error: round4(r3Abs),
+      within_two_x: r3Errs.filter((e) => Math.abs(e) <= Math.log(2)).length,
+      within_three_x: r3Errs.filter((e) => Math.abs(e) <= Math.log(3)).length,
+      total: r3Errs.length,
+      spearman: round4(spearman(r3Pred, r3Actual)),
+    },
   };
 }
 
@@ -689,7 +736,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null, net: NetFarm)
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, calibration: Calibration): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, fit: ModelFit): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug, even one the snapshot no longer carries (it cannot,
@@ -710,7 +757,7 @@ export function buildBoard(snapshot: Snapshot, calibration: Calibration): BoardR
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, calibration);
+    const v = impliedValue(p, snapshot.as_of, fit);
     const net = netFarm(p, v.implied, v.age);
     return { p, v, net };
   });
@@ -731,11 +778,10 @@ export function buildBoard(snapshot: Snapshot, calibration: Calibration): BoardR
     age_days: s.v.age,
     implied_value_usd: s.v.implied,
     model: {
-      multiple: s.v.multiple,
-      comps: s.v.comps,
-      growth_pct: s.v.growthPct,
-      growth_multiplier: round4(s.v.growthMult),
-      maturity_multiplier: round4(s.v.maturityMult),
+      log_tvl: s.v.logTvl,
+      log_ratio: s.v.logRatio,
+      category_adjustment: s.v.categoryAdj,
+      implied_multiple: s.v.multiple,
       age_days: s.v.age,
     },
     net_farm: s.net,
@@ -773,11 +819,9 @@ export function radarRow(row: BoardRow): RadarRow {
     mcap_usd: row.mcap_usd,
     listed_at: row.listed_at,
     age_days: row.age_days,
-    multiple: row.model.multiple,
-    comps: row.model.comps,
+    implied_multiple: row.model.implied_multiple,
+    category_adjustment: row.model.category_adjustment,
     implied_value_usd: row.implied_value_usd,
-    growth_multiplier: row.model.growth_multiplier,
-    maturity_multiplier: row.model.maturity_multiplier,
     net_usd: row.net_farm.net_usd,
     breakeven_usd: row.net_farm.breakeven_usd,
     net_farm: row.net_farm,
@@ -787,9 +831,9 @@ export function radarRow(row: BoardRow): RadarRow {
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
   const comparables = snapshot.protocols.filter(isComparable);
-  const calibration = calibrateComps(comparables);
+  const fit = fitModel(comparables);
   const oos = outOfSampleCheck(comparables, snapshot.as_of);
-  const board = buildBoard(snapshot, calibration);
+  const board = buildBoard(snapshot, fit);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const breakevens = board.map((r) => r.net_farm.breakeven_usd).sort((a, b) => a - b);
@@ -799,8 +843,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     floor_usd: snapshot.floor_usd,
     model_version: MODEL_VERSION,
     community_share: COMMUNITY_SHARE,
-    constants: MODEL_CONSTANTS,
-    calibration,
+    fit,
     oos,
     watchlist_size: snapshot.watchlist.length,
     watchlist: [...snapshot.watchlist],
@@ -873,7 +916,7 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
     const steps = r.farm_steps;
     if (steps.length < 3 || steps.length > 12) return `${r.slug} has ${steps.length} farm steps`;
     for (const s of steps) if (s.length < 20 || s.length > 600) return `${r.slug} has a farm step of ${s.length} characters`;
-    if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0) return `${r.slug} has implied value ${r.implied_value_usd}`;
+    if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0 || r.implied_value_usd > 1e14) return `${r.slug} has implied value ${r.implied_value_usd}`;
   }
   return null;
 }

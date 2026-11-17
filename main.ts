@@ -1,7 +1,7 @@
 // Token Radar's entry point (Node 22, standard library only).
 //
 // It reads the sealed snapshot (from /input/snapshot.json, or --input <file|dir>), scores
-// every pre-token protocol the house rule keeps with the radar-3 model in lib/model.ts, and
+// every pre-token protocol the house rule keeps with the radar-4 model in lib/model.ts, and
 // writes the ranked board to /output/board.json. It also copies this repository's
 // dashboard/ and screenshots/ into /output, emits /output/data.js for the dashboard, and
 // finishes with /output/dossier.json, the summary the judge reads, built with the vendored
@@ -10,10 +10,11 @@
 // The dashboard is a static page with no framework and no network: dashboard/index.html,
 // dashboard/app.css and dashboard/app.js read /output/data.js, which this program writes
 // from the same board, so the page and the board can never disagree. The page renders the
-// ranked board with a Multiple column, a Chain filter and a Watchlist-only switch; each row's
-// detail drawer recomputes its implied value from the snapshot figures with the same constants
-// the model used, and shows the farm plan netted to farm value; a methodology panel below the
-// board prints the calibration table, the out-of-sample test and the netting rule.
+// ranked board with an implied-multiple column, chain and category filters and a
+// watchlist-only switch; each row's detail drawer recomputes its implied value from the
+// snapshot figures with the fitted model, and shows the farm plan netted to farm value; a
+// methodology panel below the board prints the fitted regression, the category
+// adjustments, the out-of-sample test and the netting rule.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
@@ -94,8 +95,9 @@ const dossierBytes = statSync(dossierPath).size;
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: calibration over ${radar.calibration.comps_total} live comparables (${radar.calibration.comps_kept} inside the fence), fallback multiple ${radar.calibration.global_multiple}x\n` +
-    `token radar: out of sample, median |log error| ${radar.oos.median_abs_log_error} (about ${radar.oos.typical_factor}x), ${radar.oos.within_two_x}/${radar.oos.total} within 2x, Spearman ${radar.oos.spearman} against ${radar.oos.tvl_baseline_spearman} for TVL alone\n` +
+    `token radar: regression over ${radar.fit.comps_total} live comparables, anchor ${radar.fit.anchor}, slope ${radar.fit.slope} (log mcap grows at ${(1 + radar.fit.slope).toFixed(2)} on log TVL)\n` +
+    `token radar: out of sample, median |log error| ${radar.oos.median_abs_log_error} (about ${radar.oos.typical_factor}x), ${radar.oos.within_two_x}/${radar.oos.total} within 2x, Spearman ${radar.oos.spearman} pooled / ${radar.oos.spearman_fold_mean} fold-mean against ${radar.oos.tvl_baseline_spearman} for TVL alone\n` +
+    `token radar: radar-3 recomputed on the same ${radar.oos.radar3_baseline.total}: median |log error| ${radar.oos.radar3_baseline.median_abs_log_error}, ${radar.oos.radar3_baseline.within_two_x}/${radar.oos.radar3_baseline.total} within 2x, Spearman ${radar.oos.radar3_baseline.spearman}\n` +
     `token radar: ${radar.rows_net_positive} rows net positive at plan capital, median break-even $${radar.median_breakeven_usd.toLocaleString('en-US')}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')} (${dossierBytes.toLocaleString('en-US')} bytes)\n`,
 );
