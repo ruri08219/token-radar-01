@@ -9,7 +9,7 @@ protocol snapshot, ranks every pre-token protocol the watchlist's own rule would
 implied value, and hands in a static dashboard a reader can sort, filter and open row by row,
 with a farm plan for each protocol.
 
-## The model (radar-4)
+## The model (radar-4.1)
 
 Implied value is priced off the market itself, by one regression fitted on the snapshot's
 own live-token comparables, in log space:
@@ -68,6 +68,63 @@ Spearman 0.41. The table above recomputes it on the same 128.)
 The numbers are what they are: a regression fitted on other protocols prices a held-out
 market cap only roughly, and the board says so instead of hiding it.
 
+## Robustness: leave one category out, and change the loss
+
+Two checks ask whether that validation survives the choices the model made, and both
+are computed in `lib/model.ts` (`locoCheck`, `sensitivityCheck`) and shown on the
+dashboard's methodology panel — not asserted here, but re-derived from the same
+snapshot on every run.
+
+**Leave-one-category-out.** The regression is refitted 34 times, once per category
+that holds a live comparable, with that whole category removed, and the removed
+category's protocols are priced by the refit — a fit that never saw them and gives
+them no category adjustment at all, pricing them off the line alone. The refitted
+slopes run from −0.5058 (CEX held out) to −0.4005 (Staking Pool held out), a range of
+0.1053, all keeping the full fit's negative sign: the sublinear slope is not one
+category's doing. Rebuilding the board under each refit keeps a median of 10 of the
+top 10 in the top 10, and never fewer than 9 (Basis Trading, Dexs, Onchain Capital
+Allocator and RWA each lose one): the board's head does not ride on any single
+category's adjustment.
+
+The held-out categories price worse than the five-fold check — a median |log error|
+of 1.5232 across the 34 folds, against 1.2787 out of sample — because a category
+priced with no adjustment of its own is priced blind. The singletons price worst of
+all: Prediction Market at 6.7009, Collateral Management at 3.5017, Liquidity Manager
+at 3.4022. The best-held-out categories price well: CDP at 0.2697, Lending's
+near-neighbours Restaking at 0.4235, RWA at 0.5610 with 6 of its 9 held-out
+protocols within 2x and a rank correlation of 0.75. The board reports the bad folds
+with the good ones.
+
+| Held-out category | Held out | Refit slope | Median \|log error\| | Within 2x | Top-10 overlap |
+|---|---|---|---|---|---|
+| Lending | 15 | −0.4886 | 2.0168 | 5 / 15 | 10 / 10 |
+| Dexs | 11 | −0.4507 | 1.7280 | 2 / 11 | 9 / 10 |
+| CEX | 9 | −0.5058 | 1.8346 | 2 / 9 | 10 / 10 |
+| Liquid Staking | 9 | −0.4383 | 1.1869 | 2 / 9 | 10 / 10 |
+| RWA | 9 | −0.4390 | 0.5610 | 6 / 9 | 9 / 10 |
+| Yield | 9 | −0.4687 | 1.3462 | 2 / 9 | 10 / 10 |
+| Canonical Bridge | 8 | −0.4597 | 1.8975 | 2 / 8 | 10 / 10 |
+| Basis Trading | 7 | −0.4425 | 0.8659 | 2 / 7 | 9 / 10 |
+
+(Full table: all 34 categories, on the dashboard. The eight above are the categories
+with seven or more live comparables.)
+
+**Slope sensitivity.** The same five-fold out-of-sample check, refitted under four
+losses on the same folds — Huber c = 1.0, 1.345 (the published fit) and 2.0, and
+plain OLS with no reweighting at all. The median |log error| moves only from 1.2644
+to 1.2791 across all four, and the within-2x count from 41 to 43 of 128: the
+validation does not depend on the choice of loss. The rank correlation does drift,
+and the table shows the trade instead of picking the loss that flatters one number:
+OLS prices the typical protocol a touch closer (1.2644) but ranks them worse
+(Spearman 0.3911 against 0.4075), so the Huber fit is kept for its ranking.
+
+| Loss | Anchor | Slope | Median \|log error\| | Within 2x | Spearman |
+|---|---|---|---|---|---|
+| Huber c = 1.0 | −1.5436 | −0.4498 | 1.2791 | 41 / 128 | 0.4078 |
+| Huber c = 1.345 (published) | −1.5436 | −0.4456 | 1.2787 | 41 / 128 | 0.4075 |
+| Huber c = 2.0 | −1.5436 | −0.4537 | 1.2681 | 41 / 128 | 0.3994 |
+| Plain OLS (no Huber) | −1.5436 | −0.4768 | 1.2644 | 43 / 128 | 0.3911 |
+
 ## The board
 
 The watchlist is the floor, never the ceiling: every protocol with at least $50M of TVL
@@ -79,7 +136,14 @@ protocols from still-to-come: live tokens are never ranked alongside pre-token o
 
 Top of the board: Sentora Curator at $97.9M, Steakhouse Financial at $97.8M, Gauntlet at
 $71.8M — the three biggest risk-curator vaults, priced off a line that pays sublinearly
-for their multi-billion TVLs.
+for their multi-billion TVLs. The dashboard opens with those ten as a spotlight strip
+(Sentora Curator $97.9M down to BitFi Basis $35.3M), then the full sortable board, then
+two summary tables computed from the same board: by category (32 categories, richest
+median implied value first — CDP Manager $27.3M, Collateral Markets $26.1M, RWA $15.8M
+across 16 rows with OnRe $41.2M on top) and by chain (52 first-named chains, most rows
+first — Ethereum 56 rows with Sentora Curator on top, Solana 20, Binance 11). Selecting
+a spotlight card, a summary row's top protocol, or a board row opens the same detail
+drawer for that protocol.
 
 ## Farm plans, netted
 
@@ -103,4 +167,7 @@ dashboard is a static page with no framework and no network: it reads `data.js`,
 is written from the same board, so the page and the board can never disagree. Each row's
 detail drawer recomputes its implied value from the snapshot figures with the fitted
 regression, and the methodology panel prints the fit, the category adjustments, the
-out-of-sample test and the radar-3 comparison.
+out-of-sample test and the radar-3 comparison — plus, in radar-4.1, the top-10
+spotlight, the per-category and per-chain summary tables, and a Robustness section
+with the leave-one-category-out folds and the slope-sensitivity table, all of it
+computed by the program from the snapshot on every run.

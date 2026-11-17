@@ -47,6 +47,14 @@
 // expected share of the implied value, and the plan says the net and the capital at which
 // the position pays for its own gas. The share is an assumption, stated in the open:
 // 7% of the implied value is assumed to reach farmers.
+//
+// Robustness is checked two more ways in this file, and both are reported, not hidden:
+// leave-one-category-out refits the regression with each category's comparables removed
+// in turn and prices the removed category, so a board that only works because one
+// category carries it cannot pass unnoticed; and a slope-sensitivity table refits with
+// Huber c = 1.0, 1.345 and 2.0 and with plain OLS, so the reader can see how much of the
+// validation survives the choice of loss. A model whose slope flips sign when one
+// category leaves, or whose error doubles under OLS, would be a model to distrust.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -72,7 +80,7 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-4.1';
 
 /** How many pre-token protocols the watchlist leaves out the early radar carries, by TVL. */
 export const EARLY_ROWS = 157;
@@ -160,6 +168,81 @@ export interface OosReport {
   tvl_baseline_spearman: number;
   /** Radar-3's calibration, recomputed on the same 128 comparables and folds. */
   radar3_baseline: Radar3Baseline;
+}
+
+/** One category held out by the leave-one-category-out check. */
+export interface LocoFold {
+  category: string;
+  /** Comparables of this category, priced by a fit that never saw them. */
+  held_out: number;
+  /** Comparables left to fit on after this category was removed. */
+  train: number;
+  anchor: number;
+  slope: number;
+  median_abs_log_error: number;
+  within_two_x: number;
+  /** Rank correlation on the held-out category, or null when it holds fewer than two protocols. */
+  spearman: number | null;
+  /** How many of the full board's top 10 stay in the top 10 under this refit. */
+  top10_overlap: number;
+}
+
+/** The leave-one-category-out report: the fit refitted once per category, each time blind to it. */
+export interface LocoReport {
+  folds: LocoFold[];
+  categories_tested: number;
+  /** The smallest and largest refitted slope across the held-out categories. */
+  slope_min: number;
+  slope_max: number;
+  slope_range: number;
+  /** Whether every refitted slope keeps the same sign as the full fit's slope. */
+  all_slopes_same_sign: boolean;
+  /** The median top-10 overlap across refits, and the worst one. */
+  median_top10_overlap: number;
+  min_top10_overlap: number;
+  /** The median |log error| across the held-out categories, one number per category. */
+  median_fold_error: number;
+}
+
+/** One row of the slope-sensitivity table: the same five-fold check under one loss. */
+export interface SensitivityRow {
+  variant: string;
+  /** The Huber constant, or null for plain ordinary least squares with no reweighting. */
+  huber_c: number | null;
+  anchor: number;
+  slope: number;
+  median_abs_log_error: number;
+  within_two_x: number;
+  total: number;
+  spearman: number;
+}
+
+/** The slope-sensitivity report: one five-fold check per loss, on the same folds. */
+export interface SensitivityReport {
+  rows: SensitivityRow[];
+}
+
+/** One category's board summary: how its rows price, and which of them prices highest. */
+export interface CategorySummary {
+  category: string;
+  count: number;
+  median_multiple: number;
+  median_implied_usd: number;
+  top_slug: string;
+  top_name: string;
+  top_implied_usd: number;
+  median_breakeven_usd: number;
+}
+
+/** One chain's board summary: how many rows run on it, and which prices highest. */
+export interface ChainSummary {
+  chain: string;
+  count: number;
+  median_multiple: number;
+  median_tvl_usd: number;
+  top_slug: string;
+  top_name: string;
+  top_implied_usd: number;
 }
 
 /** A farm plan netted to the farm: the position's expected value against its own gas. */
@@ -255,6 +338,14 @@ export interface RadarData {
   live_size: number;
   rows_net_positive: number;
   median_breakeven_usd: number;
+  /** Leave-one-category-out robustness: the fit refitted once per category, blind to it. */
+  loco: LocoReport;
+  /** Slope sensitivity: the same five-fold check under Huber c = 1.0, 1.345, 2.0 and plain OLS. */
+  sensitivity: SensitivityReport;
+  /** One summary row per category on the board, richest median implied value first. */
+  category_summary: CategorySummary[];
+  /** One summary row per first-named chain on the board, most rows first. */
+  chain_summary: ChainSummary[];
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -602,6 +693,260 @@ export function outOfSampleCheck(comparables: SnapshotProtocol[], asOf: string):
   };
 }
 
+/**
+ * Fit the model on a set of comparables under one loss: Huber reweighting at the given
+ * constant, or plain ordinary least squares when `huberC` is null. This is the variant
+ * fitter the sensitivity table and the leave-one-category-out check run through; the
+ * published fit is the c = 1.345 case, identical to fitModel. The anchor is the median
+ * log ratio, the slope is the ridge-penalised least-squares slope on centred log TVL,
+ * reweighted up to eight times under Huber, and each category's adjustment is its median
+ * residual inside the Tukey fence, shrunk by n / (n + 3). Numbers are rounded to four
+ * decimals and the model predicts from the rounded numbers.
+ */
+export function fitModelVariant(comparables: SnapshotProtocol[], huberC: number | null): ModelFit {
+  const logRatios = comparables.map((p) => Math.log((p.mcap_usd as number) / p.tvl_usd));
+  const anchor = round4(median(logRatios));
+  const logTvls = comparables.map((p) => Math.log(p.tvl_usd));
+  const ltMean = round4(logTvls.reduce((a, b) => a + b, 0) / logTvls.length);
+  const xs = logTvls.map((v) => v - ltMean);
+  const ys = logRatios.map((v) => v - anchor);
+  let slope = weightedSlope(xs, ys, xs.map(() => 1));
+  if (huberC !== null) {
+    for (let round = 0; round < HUBER_ROUNDS; round++) {
+      const residuals = ys.map((y, i) => y - slope * xs[i]!);
+      const centre = median(residuals);
+      const mad = median(residuals.map((r) => Math.abs(r - centre)));
+      const scale = huberC * 1.4826 * mad + 1e-9;
+      const weights = residuals.map((r) => Math.min(1, scale / Math.max(Math.abs(r), 1e-9)));
+      slope = weightedSlope(xs, ys, weights);
+    }
+  }
+  slope = round4(slope);
+  const residuals = ys.map((y, i) => y - slope * xs[i]!);
+  const ratios = comparables.map((p) => (p.mcap_usd as number) / p.tvl_usd);
+  const q1 = quartile(ratios, 0.25);
+  const q3 = quartile(ratios, 0.75);
+  const iqr = q3 - q1;
+  const fenceLow = q1 - 1.5 * iqr;
+  const fenceHigh = q3 + 1.5 * iqr;
+  const byCategory = new Map<string, number[]>();
+  comparables.forEach((p, i) => {
+    const r = ratios[i]!;
+    if (r < fenceLow || r > fenceHigh) return;
+    const key = p.category ?? 'Other';
+    const list = byCategory.get(key) ?? [];
+    list.push(residuals[i]!);
+    byCategory.set(key, list);
+  });
+  const categories: CategoryAdjustment[] = [...byCategory.entries()]
+    .map(([category, list]) => {
+      const med = median(list);
+      const adj = round4(med * (list.length / (list.length + CAT_SHRINK)));
+      return {
+        category,
+        comps: list.length,
+        median_residual: round4(med),
+        adjustment: adj,
+        multiple_at_mean_tvl: round4(Math.exp(anchor + adj)),
+      };
+    })
+    .sort((a, b) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
+  return { comps_total: comparables.length, anchor, lt_mean: ltMean, slope, categories };
+}
+
+/**
+ * The five-fold out-of-sample check under any fitter: the comparables are split into
+ * five folds by slug, each fold refits on the other four through `fitFn` and prices the
+ * held-out protocols, and the report pools the held-out errors. outOfSampleCheck is the
+ * same check with the published Huber fit; the sensitivity table runs this one per loss.
+ */
+export function oosWithFitter(
+  comparables: SnapshotProtocol[],
+  fitFn: (train: SnapshotProtocol[]) => ModelFit,
+): { median_abs_log_error: number; within_two_x: number; within_three_x: number; total: number; spearman: number; spearman_fold_mean: number } {
+  const sorted = [...comparables].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const folds: SnapshotProtocol[][] = Array.from({ length: OOS_FOLDS }, () => []);
+  sorted.forEach((p, i) => {
+    folds[i % OOS_FOLDS]!.push(p);
+  });
+  const allErrs: number[] = [];
+  const allPred: number[] = [];
+  const allActual: number[] = [];
+  const foldSpearman: number[] = [];
+  for (let fi = 0; fi < OOS_FOLDS; fi++) {
+    const test = folds[fi]!;
+    const train = folds.flatMap((f, j) => (j === fi ? [] : f));
+    const fit = fitFn(train);
+    const preds: number[] = [];
+    const actuals: number[] = [];
+    for (const p of test) {
+      const pred = p.tvl_usd * Math.exp(fit.anchor + fit.slope * (Math.log(p.tvl_usd) - fit.lt_mean) + categoryAdjustment(fit, p.category));
+      allErrs.push(Math.log(pred / (p.mcap_usd as number)));
+      preds.push(pred);
+      actuals.push(p.mcap_usd as number);
+    }
+    foldSpearman.push(spearman(preds, actuals));
+    allPred.push(...preds);
+    allActual.push(...actuals);
+  }
+  return {
+    median_abs_log_error: round4(median(allErrs.map(Math.abs))),
+    within_two_x: allErrs.filter((e) => Math.abs(e) <= Math.log(2)).length,
+    within_three_x: allErrs.filter((e) => Math.abs(e) <= Math.log(3)).length,
+    total: allErrs.length,
+    spearman: round4(spearman(allPred, allActual)),
+    spearman_fold_mean: round4(foldSpearman.reduce((a, b) => a + b, 0) / foldSpearman.length),
+  };
+}
+
+/**
+ * Leave-one-category-out robustness. For every category that holds at least one live
+ * comparable, refit the model with that whole category removed and price the removed
+ * category's protocols with the refit — a fit that never saw them, and that gives the
+ * removed category no adjustment at all, pricing it off the line alone. Then rebuild
+ * the board under the refit and count how many of the full board's top 10 stay in the
+ * top 10: a board whose head is carried by one category's adjustment would fall apart
+ * here, and the report would say so. Categories with fewer than ten comparables left
+ * to train on are skipped, so a tiny training set never stands in for a refit.
+ */
+export function locoCheck(comparables: SnapshotProtocol[], snapshot: Snapshot, fit: ModelFit): LocoReport {
+  const baseTop = new Set(buildBoard(snapshot, fit).slice(0, 10).map((r) => r.slug));
+  const categories = [...new Set(comparables.map((p) => p.category ?? 'Other'))].sort();
+  const folds: LocoFold[] = [];
+  for (const category of categories) {
+    const heldOut = comparables.filter((p) => (p.category ?? 'Other') === category);
+    const train = comparables.filter((p) => (p.category ?? 'Other') !== category);
+    if (train.length < 10 || heldOut.length === 0) continue;
+    const refit = fitModel(train);
+    const errs: number[] = [];
+    const preds: number[] = [];
+    const actuals: number[] = [];
+    for (const p of heldOut) {
+      const pred = p.tvl_usd * Math.exp(refit.anchor + refit.slope * (Math.log(p.tvl_usd) - refit.lt_mean) + categoryAdjustment(refit, p.category));
+      errs.push(Math.log(pred / (p.mcap_usd as number)));
+      preds.push(pred);
+      actuals.push(p.mcap_usd as number);
+    }
+    const refitTop = buildBoard(snapshot, refit).slice(0, 10).map((r) => r.slug);
+    const rawSpearman = heldOut.length >= 2 ? spearman(preds, actuals) : NaN;
+    folds.push({
+      category,
+      held_out: heldOut.length,
+      train: train.length,
+      anchor: refit.anchor,
+      slope: refit.slope,
+      median_abs_log_error: round4(median(errs.map(Math.abs))),
+      within_two_x: errs.filter((e) => Math.abs(e) <= Math.log(2)).length,
+      spearman: Number.isFinite(rawSpearman) ? round4(rawSpearman) : null,
+      top10_overlap: refitTop.filter((s) => baseTop.has(s)).length,
+    });
+  }
+  const slopes = folds.map((f) => f.slope);
+  const overlaps = folds.map((f) => f.top10_overlap).sort((a, b) => a - b);
+  return {
+    folds,
+    categories_tested: folds.length,
+    slope_min: round4(Math.min(...slopes)),
+    slope_max: round4(Math.max(...slopes)),
+    slope_range: round4(Math.max(...slopes) - Math.min(...slopes)),
+    all_slopes_same_sign: slopes.every((s) => Math.sign(s) === Math.sign(fit.slope)),
+    median_top10_overlap: median(overlaps),
+    min_top10_overlap: overlaps[0] ?? 0,
+    median_fold_error: round4(median(folds.map((f) => f.median_abs_log_error))),
+  };
+}
+
+/**
+ * Slope sensitivity: the same five-fold out-of-sample check, refitted under four losses
+ * on the same folds — Huber c = 1.0 (heavy downweighting), c = 1.345 (the published
+ * fit), c = 2.0 (light downweighting) and plain OLS with no reweighting at all. If the
+ * validation only held at one constant, the choice of loss would be doing the work;
+ * the table shows whether it holds across all four.
+ */
+export function sensitivityCheck(comparables: SnapshotProtocol[]): SensitivityReport {
+  const variants: { variant: string; huberC: number | null }[] = [
+    { variant: 'Huber c = 1.0', huberC: 1.0 },
+    { variant: 'Huber c = 1.345 (published)', huberC: HUBER_C },
+    { variant: 'Huber c = 2.0', huberC: 2.0 },
+    { variant: 'Plain OLS (no Huber)', huberC: null },
+  ];
+  const rows: SensitivityRow[] = variants.map((v) => {
+    const fit = fitModelVariant(comparables, v.huberC);
+    const oos = oosWithFitter(comparables, (train) => fitModelVariant(train, v.huberC));
+    return {
+      variant: v.variant,
+      huber_c: v.huberC,
+      anchor: fit.anchor,
+      slope: fit.slope,
+      median_abs_log_error: oos.median_abs_log_error,
+      within_two_x: oos.within_two_x,
+      total: oos.total,
+      spearman: oos.spearman,
+    };
+  });
+  return { rows };
+}
+
+/**
+ * One summary row per category on the board: how many rows it holds, the median implied
+ * multiple and implied value across them, the protocol that prices highest, and the
+ * median break-even capital. Richest median implied value first, so the categories
+ * the model prices highest lead the table.
+ */
+export function categorySummaries(board: BoardRow[]): CategorySummary[] {
+  const groups = new Map<string, BoardRow[]>();
+  for (const r of board) {
+    const key = r.category ?? 'Other';
+    const list = groups.get(key) ?? [];
+    list.push(r);
+    groups.set(key, list);
+  }
+  return [...groups.entries()]
+    .map(([category, rows]) => {
+      const top = [...rows].sort((a, b) => b.implied_value_usd - a.implied_value_usd)[0]!;
+      return {
+        category,
+        count: rows.length,
+        median_multiple: round4(median(rows.map((r) => r.model.implied_multiple))),
+        median_implied_usd: Math.round(median(rows.map((r) => r.implied_value_usd))),
+        top_slug: top.slug,
+        top_name: top.name,
+        top_implied_usd: top.implied_value_usd,
+        median_breakeven_usd: Math.round(median(rows.map((r) => r.net_farm.breakeven_usd))),
+      };
+    })
+    .sort((a, b) => b.median_implied_usd - a.median_implied_usd || b.count - a.count || (a.category < b.category ? -1 : 1));
+}
+
+/**
+ * One summary row per first-named chain on the board: how many rows run on it, the
+ * median implied multiple and median TVL across them, and the protocol that prices
+ * highest. Most rows first, so the chains the board concentrates on lead the table.
+ */
+export function chainSummaries(board: BoardRow[]): ChainSummary[] {
+  const groups = new Map<string, BoardRow[]>();
+  for (const r of board) {
+    const key = r.chains.length > 0 ? r.chains[0]! : 'Unknown';
+    const list = groups.get(key) ?? [];
+    list.push(r);
+    groups.set(key, list);
+  }
+  return [...groups.entries()]
+    .map(([chain, rows]) => {
+      const top = [...rows].sort((a, b) => b.implied_value_usd - a.implied_value_usd)[0]!;
+      return {
+        chain,
+        count: rows.length,
+        median_multiple: round4(median(rows.map((r) => r.model.implied_multiple))),
+        median_tvl_usd: Math.round(median(rows.map((r) => r.tvl_usd))),
+        top_slug: top.slug,
+        top_name: top.name,
+        top_implied_usd: top.implied_value_usd,
+      };
+    })
+    .sort((a, b) => b.count - a.count || b.top_implied_usd - a.top_implied_usd || (a.chain < b.chain ? -1 : 1));
+}
+
 /** How much capital one farm position needs, from the protocol's own TVL. */
 function capitalFor(p: SnapshotProtocol): number {
   if (p.tvl_usd >= 5_000_000_000) return 250;
@@ -837,6 +1182,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const breakevens = board.map((r) => r.net_farm.breakeven_usd).sort((a, b) => a - b);
+  const loco = locoCheck(comparables, snapshot, fit);
+  const sensitivity = sensitivityCheck(comparables);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -845,6 +1192,10 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     community_share: COMMUNITY_SHARE,
     fit,
     oos,
+    loco,
+    sensitivity,
+    category_summary: categorySummaries(board),
+    chain_summary: chainSummaries(board),
     watchlist_size: snapshot.watchlist.length,
     watchlist: [...snapshot.watchlist],
     board_size: board.length,

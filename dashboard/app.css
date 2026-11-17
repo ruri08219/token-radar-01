@@ -1,4 +1,4 @@
-/* Token Radar dashboard (radar-4). Dark page, gold accent, no network: every byte
+/* Token Radar dashboard (radar-4.1). Dark page, gold accent, no network: every byte
    the page shows comes from data.js beside it. */
 :root {
   --bg: #0c0e12;
@@ -89,6 +89,24 @@ th button:hover { color: var(--gold); }
 .empty h2 { margin: 0 0 6px; }
 .empty p { color: var(--muted); }
 
+/* Top-10 spotlight */
+.spotlight h2 { margin: 0 0 4px; font-size: 20px; }
+.spot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 10px; }
+.spot-card {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+  text-align: left; cursor: pointer; display: flex; flex-direction: column; gap: 2px; color: inherit;
+}
+.spot-card:hover, .spot-card:focus { border-color: var(--gold); outline: none; }
+.spot-rank { color: var(--gold); font-weight: 700; font-size: 12px; }
+.spot-card b { font-size: 14.5px; }
+.spot-value { font-size: 17px; color: var(--gold); font-weight: 700; }
+
+/* Category and chain summaries */
+.summaries { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+.summaries > * { min-width: 0; }
+.summary h2 { margin: 0 0 4px; font-size: 20px; }
+.summary tbody tr { cursor: pointer; }
+
 /* Methodology */
 .model h2 { margin: 0 0 8px; font-size: 20px; }
 .model h3 { margin: 22px 0 8px; font-size: 16px; }
@@ -124,6 +142,9 @@ dialog.detail::backdrop { background: rgba(0, 0, 0, 0.65); }
 .steps li b { display: block; font-weight: 600; }
 .steps .cost { color: var(--muted); font-size: 13px; }
 .steps li.net { background: var(--panel-2); border: 1px solid var(--gold-dim); border-radius: 8px; padding: 10px 12px; margin-left: -22px; list-style: none; }
+@media (max-width: 860px) {
+  .summaries { grid-template-columns: 1fr; }
+}
 @media (max-width: 640px) {
   .lede h1 { font-size: 22px; }
   .facts { grid-template-columns: 1fr 1fr; width: 100%; }

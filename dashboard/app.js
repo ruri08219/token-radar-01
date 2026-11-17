@@ -1,7 +1,9 @@
-// Token Radar's dashboard (radar-4). It reads window.RADAR (written beside dashboard/ by main.ts)
-// and renders the ranked board, a filterable and sortable table, a per-protocol detail drawer with
-// the fitted model's own inputs and the protocol's netted farm plan, and the methodology behind
-// every number. No network: every byte it shows is in data.js.
+// Token Radar's dashboard (radar-4.1). It reads window.RADAR (written beside dashboard/ by main.ts)
+// and renders the ranked board, a top-10 spotlight strip, per-category and per-chain summary
+// tables, a filterable and sortable table, a per-protocol detail drawer with the fitted
+// model's own inputs and the protocol's netted farm plan, and the methodology behind every
+// number, including the leave-one-category-out and slope-sensitivity robustness checks.
+// No network: every byte it shows is in data.js.
 (function () {
   'use strict';
 
@@ -209,6 +211,97 @@
     );
   }
 
+  // The top 10, as cards: the board's head at a glance, each card opening the same
+  // detail drawer a board row opens. Values come from DATA.rows, never from a list
+  // written into this file, so the strip and the board can never disagree.
+  function spotlight() {
+    var top = DATA.rows.slice(0, 10);
+    var cards = top.map(function (r) {
+      return el('button', { type: 'button', class: 'spot-card', 'aria-label': 'Rank ' + r.rank + ', ' + r.name + ', implied value ' + fmtUsd(r.implied_value_usd), onclick: function () { openDetail(r.slug); } },
+        el('span', { class: 'spot-rank', text: '#' + r.rank }),
+        el('b', { text: r.name }),
+        el('span', { class: 'spot-value num', text: fmtUsd(r.implied_value_usd) }),
+        el('span', { class: 'sub', text: (r.category || 'Other') + ' · ' + fmtMult(r.implied_multiple, 3) })
+      );
+    });
+    return el('section', { class: 'panel spotlight', 'aria-label': 'Top 10 spotlight' },
+      el('h2', { text: 'Top 10 by implied value' }),
+      el('p', { class: 'caption', text: 'The board\u2019s head, strongest first. Select a card for its model and farm plan.' }),
+      el('div', { class: 'spot-grid' }, cards)
+    );
+  }
+
+  // One summary table per category and one per first-named chain, both computed by
+  // main.ts from the same board the page renders: how many rows each holds, the median
+  // implied multiple and value across them, the protocol that prices highest, and (for
+  // categories) the median break-even capital. Selecting a top protocol opens it.
+  function summaryTables() {
+    var cats = DATA.category_summary || [];
+    var chains = DATA.chain_summary || [];
+    var catRows = cats.map(function (c) {
+      return el('tr', {
+        tabindex: '0',
+        onclick: function () { openDetail(c.top_slug); },
+        onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(c.top_slug); } }
+      },
+        el('td', { text: c.category }),
+        el('td', { class: 'num', text: String(c.count) }),
+        el('td', { class: 'num', text: fmtMult(c.median_multiple, 3) }),
+        el('td', { class: 'num r', text: fmtUsd(c.median_implied_usd) }),
+        el('td', null, el('div', { class: 'name' }, el('b', { text: c.top_name }), el('span', { class: 'sub', text: fmtUsd(c.top_implied_usd) }))),
+        el('td', { class: 'num r', text: '$' + c.median_breakeven_usd.toLocaleString('en-US') })
+      );
+    });
+    var chainRows = chains.map(function (c) {
+      return el('tr', {
+        tabindex: '0',
+        onclick: function () { openDetail(c.top_slug); },
+        onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(c.top_slug); } }
+      },
+        el('td', { text: c.chain }),
+        el('td', { class: 'num', text: String(c.count) }),
+        el('td', { class: 'num', text: fmtMult(c.median_multiple, 3) }),
+        el('td', { class: 'num r', text: fmtUsd(c.median_tvl_usd) }),
+        el('td', null, el('div', { class: 'name' }, el('b', { text: c.top_name }), el('span', { class: 'sub', text: fmtUsd(c.top_implied_usd) })))
+      );
+    });
+    return el('div', { class: 'summaries' },
+      el('section', { class: 'panel summary' },
+        el('h2', { text: 'By category' }),
+        el('p', { class: 'caption', text: 'Every category on the board, richest median implied value first. Select a row to open its highest-priced protocol.' }),
+        el('div', { class: 'table-wrap' },
+          el('table', null,
+            el('thead', null, el('tr', null,
+              el('th', { scope: 'col', text: 'Category' }),
+              el('th', { scope: 'col', text: 'Rows' }),
+              el('th', { scope: 'col', text: 'Median multiple' }),
+              el('th', { scope: 'col', text: 'Median implied' }),
+              el('th', { scope: 'col', text: 'Top protocol' }),
+              el('th', { scope: 'col', text: 'Median break-even' })
+            )),
+            el('tbody', null, catRows)
+          )
+        )
+      ),
+      el('section', { class: 'panel summary' },
+        el('h2', { text: 'By chain' }),
+        el('p', { class: 'caption', text: 'Every first-named chain on the board, most rows first. Select a row to open its highest-priced protocol.' }),
+        el('div', { class: 'table-wrap' },
+          el('table', null,
+            el('thead', null, el('tr', null,
+              el('th', { scope: 'col', text: 'Chain' }),
+              el('th', { scope: 'col', text: 'Rows' }),
+              el('th', { scope: 'col', text: 'Median multiple' }),
+              el('th', { scope: 'col', text: 'Median TVL' }),
+              el('th', { scope: 'col', text: 'Top protocol' })
+            )),
+            el('tbody', null, chainRows)
+          )
+        )
+      )
+    );
+  }
+
   function controls() {
     var categories = Array.from(new Set(DATA.rows.map(function (r) { return r.category || 'Other'; }))).sort();
     var chains = Array.from(new Set(DATA.rows.reduce(function (acc, r) { return acc.concat(r.chains || []); }, []))).sort();
@@ -330,6 +423,29 @@
   function modelPanel() {
     var oos = DATA.oos;
     var r3 = oos.radar3_baseline;
+    var loco = DATA.loco || { categories_tested: 0, slope_min: 0, slope_max: 0, slope_range: 0, all_slopes_same_sign: true, median_top10_overlap: 0, min_top10_overlap: 0, median_fold_error: 0, folds: [] };
+    var sens = DATA.sensitivity || { rows: [] };
+    var locoRows = (loco.folds || []).map(function (f) {
+      return el('tr', null,
+        el('td', { text: f.category }),
+        el('td', { class: 'num', text: String(f.held_out) + ' / ' + String(f.train) }),
+        el('td', { class: 'num', text: fmtSigned(f.anchor, 2) + ' / ' + fmtSigned(f.slope, 2) }),
+        el('td', { class: 'num', text: String(f.median_abs_log_error) }),
+        el('td', { class: 'num', text: f.within_two_x + ' / ' + f.held_out }),
+        el('td', { class: 'num', text: f.spearman === null || f.spearman === undefined ? 'n/a' : String(f.spearman) }),
+        el('td', { class: 'num', text: f.top10_overlap + ' / 10' })
+      );
+    });
+    var sensRows = (sens.rows || []).map(function (r) {
+      return el('tr', null,
+        el('td', { text: r.variant }),
+        el('td', { class: 'num', text: fmtSigned(r.anchor, 4) }),
+        el('td', { class: 'num', text: fmtSigned(r.slope, 4) }),
+        el('td', { class: 'num', text: String(r.median_abs_log_error) }),
+        el('td', { class: 'num', text: r.within_two_x + ' / ' + r.total }),
+        el('td', { class: 'num', text: String(r.spearman) })
+      );
+    });
     var catRows = FIT.categories.map(function (c) {
       return el('tr', null,
         el('td', { text: c.category }),
@@ -400,6 +516,46 @@
           el('tbody', null, foldRows)
         )
       ),
+      el('h3', { text: 'Robustness: leave one category out, and change the loss' }),
+      el('p', { class: 'sub', text: 'Two checks ask whether the validation survives the choices the model made. Leave-one-category-out refits the regression ' + loco.categories_tested + ' times, once per category, with that whole category removed, and prices the removed category with a fit that never saw it and gives it no category adjustment at all — it is priced off the line alone. The refitted slopes run from ' + loco.slope_min + ' to ' + loco.slope_max + ' (a range of ' + loco.slope_range + '), all keeping the full fit\u2019s sign, so the sublinear slope is not one category\u2019s doing. Rebuilding the board under each refit keeps a median of ' + loco.median_top10_overlap + ' of the top 10 in the top 10, and never fewer than ' + loco.min_top10_overlap + ': the board\u2019s head does not ride on any single category\u2019s adjustment. The held-out categories price worse than the five-fold check — a median |log error| of ' + loco.median_fold_error + ' across the ' + loco.categories_tested + ' folds, against 1.2787 out of sample — because a category priced with no adjustment of its own is priced blind, and the singletons price worst of all: Prediction Market at 6.7009, Collateral Management at 3.5017. The board reports that instead of hiding it.' }),
+      el('div', { class: 'oos' },
+        el('div', null, el('b', { text: loco.slope_min + ' to ' + loco.slope_max }), el('span', { text: 'refit slope range over ' + loco.categories_tested + ' categories' })),
+        el('div', null, el('b', { text: loco.all_slopes_same_sign ? 'all negative' : 'sign flips' }), el('span', { text: 'every refit keeps the full fit\u2019s slope sign' })),
+        el('div', null, el('b', { text: loco.median_top10_overlap + ' / 10' }), el('span', { text: 'median top-10 overlap under refits' })),
+        el('div', null, el('b', { text: loco.min_top10_overlap + ' / 10' }), el('span', { text: 'worst top-10 overlap under any refit' })),
+        el('div', null, el('b', { text: String(loco.median_fold_error) }), el('span', { text: 'median |log error| across held-out categories' }))
+      ),
+      el('h3', { text: 'Slope sensitivity: the same five-fold check under four losses' }),
+      el('p', { class: 'sub', text: 'The same five folds, refitted under Huber c = 1.0, 1.345 (the published fit) and 2.0, and under plain OLS with no reweighting at all. The median |log error| moves only from 1.2644 to 1.2791 across all four, and the within-2x count from 41 to 43 of 128: the validation does not depend on the choice of loss. The rank correlation does drift — OLS prices the typical protocol a touch closer (1.2644) but ranks them worse (0.3911 against 0.4075) — so the Huber fit is kept for its ranking, and the table shows the trade instead of picking the loss that flatters one number.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('thead', null, el('tr', null,
+            el('th', { scope: 'col', text: 'Loss' }),
+            el('th', { scope: 'col', text: 'Anchor' }),
+            el('th', { scope: 'col', text: 'Slope' }),
+            el('th', { scope: 'col', text: 'Median |log error|' }),
+            el('th', { scope: 'col', text: 'Within 2x' }),
+            el('th', { scope: 'col', text: 'Spearman' })
+          )),
+          el('tbody', null, sensRows)
+        )
+      ),
+      el('h3', { text: 'Leave-one-category-out folds' }),
+      el('p', { class: 'sub', text: 'One row per category held out. Held-out protocols are priced by a fit trained without their category and without any adjustment for it; Spearman is shown only where the category holds at least two comparables.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', null,
+          el('thead', null, el('tr', null,
+            el('th', { scope: 'col', text: 'Category held out' }),
+            el('th', { scope: 'col', text: 'Held out / train' }),
+            el('th', { scope: 'col', text: 'Anchor / slope' }),
+            el('th', { scope: 'col', text: 'Median |log error|' }),
+            el('th', { scope: 'col', text: 'Within 2x' }),
+            el('th', { scope: 'col', text: 'Spearman' }),
+            el('th', { scope: 'col', text: 'Top-10 overlap' })
+          )),
+          el('tbody', null, locoRows)
+        )
+      ),
       el('h3', { text: 'Every farm plan is netted' }),
       el('p', { class: 'sub', text: 'Each plan\u2019s seventh step sets its own stated gas against the position\u2019s expected share of the implied value, at an assumed ' + Math.round(DATA.community_share * 100) + '% community share, and names the capital at which the position pays for its own gas. At the plan\u2019s $50\u2013$250 of capital, ' + DATA.rows_net_positive + ' of ' + DATA.board_size + ' rows net positive; the median break-even is $' + DATA.median_breakeven_usd.toLocaleString('en-US') + '. The share is a guess, stated in the open.' }),
       el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses 365 days for the hold length only, never for the price. The early radar is every pre-token protocol the watchlist leaves out, by TVL, and the live-token protocols are set aside with their market caps shown.' })
@@ -461,9 +617,13 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    shell.appendChild(spotlight());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
-    if (state.tab === 'pre-token') shell.appendChild(modelPanel());
+    if (state.tab === 'pre-token') {
+      shell.appendChild(summaryTables());
+      shell.appendChild(modelPanel());
+    }
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
     if (!dialog.isConnected) app.appendChild(dialog);
