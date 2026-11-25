@@ -1,14 +1,75 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar: pre-token protocols ranked by implied value</title>
+<title>Launch Radar — radar-5</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<a class="skip" href="#board">Skip to the board</a>
-<main id="board" tabindex="-1" aria-busy="true"></main>
+<header class="top">
+  <div>
+    <h1>Launch Radar <span class="ver">radar-5</span></h1>
+    <p class="sub">Pre-token protocols, ranked by what a token would be worth if it launches — and whether it is likely to. Every number below is fitted on the snapshot's own figures, and every term was kept only if it passed two held-out tests.</p>
+  </div>
+  <div class="snap" id="snapLine"></div>
+</header>
+<main>
+  <section id="integrity" class="strip" aria-label="Integrity checks"></section>
+  <section id="kpis" class="kpis" aria-label="Headline numbers"></section>
+  <section id="accounting" class="strip acct" aria-label="Protocol accounting"></section>
+  <section class="panel" id="evidence">
+    <h2>Out-of-sample evidence — a term is kept only if it lowers the held-out miss on both tests</h2>
+    <div class="twocol">
+      <div><h3>Value model — typical miss, 128 traded tokens</h3><div id="valueTerms"></div></div>
+      <div><h3>Token odds — Brier score, 758 protocols</h3><div id="oddsTerms"></div></div>
+    </div>
+    <p class="note" id="rangeNote"></p>
+  </section>
+  <section class="panel" id="boardPanel">
+    <h2>The board <span class="count" id="rowCount"></span></h2>
+    <div class="controls">
+      <input id="q" type="search" placeholder="Search name, chain, category" aria-label="Search">
+      <select id="catSel" aria-label="Category"><option value="">All categories</option></select>
+      <select id="chainSel" aria-label="Chain"><option value="">All chains</option></select>
+      <label class="chk"><input id="wlOnly" type="checkbox"> Watchlist only</label>
+      <div class="tiers" role="group" aria-label="Verdict">
+        <button data-tier="" class="on">All</button>
+        <button data-tier="Farm">Farm</button>
+        <button data-tier="Marginal">Marginal</button>
+        <button data-tier="Skip">Skip</button>
+      </div>
+      <select id="sortSel" aria-label="Sort">
+        <option value="implied">Implied value ↓</option>
+        <option value="launch">If it launches ↓</option>
+        <option value="odds">Token odds ↓</option>
+        <option value="tvl">TVL ↓</option>
+        <option value="net">Net of fees ↓</option>
+        <option value="name">Name A–Z</option>
+      </select>
+      <button id="csvBtn" class="ghost">CSV</button>
+      <button id="jsonBtn" class="ghost">JSON</button>
+      <button id="resetBtn" class="ghost">Reset</button>
+    </div>
+    <div class="tablewrap"><table id="board">
+      <thead><tr>
+        <th>#</th><th>Protocol</th><th>TVL</th><th>7d</th><th>No-token age</th>
+        <th>Token odds</th><th>If it launches</th><th>Implied value</th><th>P25–P75</th><th>Verdict · net</th>
+      </tr></thead>
+      <tbody id="boardBody"></tbody>
+    </table></div>
+    <p class="note">Implied value = TVL × fitted multiple × token odds. “Records no token” means the snapshot's record carries no token — not that the protocol has none. Click any row for the model breakdown and the farm plan.</p>
+  </section>
+  <section class="panel" id="method">
+    <h2>Method — what the model is, and what it survived</h2>
+    <div id="methodBody"></div>
+  </section>
+  <section class="panel" id="livePanel">
+    <h2>Already trading — the market's own values, never ranked</h2>
+    <div id="liveBody"></div>
+  </section>
+</main>
+<aside id="drawer" aria-label="Protocol detail"></aside>
 <script src="../data.js"></script>
 <script src="app.js"></script>
 </body>
